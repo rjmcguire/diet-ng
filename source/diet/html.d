@@ -26,15 +26,57 @@ import diet.traits;
 */
 template compileHTMLDietFile(string filename, ALIASES...)
 {
-	pragma(msg, "Compiling Diet HTML template "~filename~"...");
-	Document _diet_nodes() { return applyTraits!ALIASES(parseDiet!(translate!ALIASES)(collectFiles!filename)); }
+	import std.conv : to;	
+	enum _diet_files = collectFiles!filename;
+
+	version (DietUseCache) enum _diet_use_cache = true;
+	else enum _diet_use_cache = false;
+
+
+	ulong computeTemplateHash()
+	{
+		ulong ret = 0;
+		void hash(string s)
+		{
+			foreach (char c; s) {
+				ret *= 9198984547192449281;
+				ret += c * 7576889555963512219;
+			}
+		}
+		foreach (ref f; _diet_files) {
+			hash(f.name);
+			hash(f.contents);
+		}
+		return ret;
+	}
+
+	enum _diet_hash = computeTemplateHash();
+	enum _diet_cache_file_name = "_cached_"~filename~"_"~_diet_hash.to!string~".d";
+
+	static if (_diet_use_cache && is(typeof(import(_diet_cache_file_name)))) {
+		pragma(msg, "Using cached Diet HTML template "~filename~"...");
+		enum _dietParser = import(_diet_cache_file_name);
+	} else {
+		pragma(msg, "Compiling Diet HTML template "~filename~"...");
+		Document _diet_nodes() { return applyTraits!ALIASES(parseDiet!(translate!ALIASES)(_diet_files)); }
+		enum _dietParser = getHTMLMixin(_diet_nodes());
+
+		static if (_diet_use_cache) {
+			shared static this()
+			{
+				import std.file : exists, write;
+				if (!exists("views/"~_diet_cache_file_name))
+					write("views/"~_diet_cache_file_name, _dietParser);
+			}
+		}
+	}
 
 	// uses the correct range name and removes 'dst' from the scope
 	void exec(R)(ref R _diet_output)
 	{
 		mixin(localAliasesMixin!(0, ALIASES));
 		//pragma(msg, getHTMLMixin(nodes));
-		mixin(getHTMLMixin(_diet_nodes()));
+		mixin(_dietParser);
 	}
 
 	void compileHTMLDietFile(R)(ref R dst)
@@ -86,7 +128,7 @@ template compileHTMLDietStrings(alias FILES_GROUP, ALIASES...)
 	static void exec(R)(ref R _diet_output)
 	{
 		mixin(localAliasesMixin!(0, ALIASES));
-		//pragma(msg, getHTMLMixin(nodes));
+		//pragma(msg, getHTMLMixin(_diet_nodes()));
 		mixin(getHTMLMixin(_diet_nodes()));
 	}
 
@@ -110,7 +152,8 @@ string getHTMLMixin(in Document doc, string range_name = dietOutputRangeName)
 {
 	CTX ctx;
 	ctx.rangeName = range_name;
-	string ret = "import std.conv : to;\n";
+	string ret = "import diet.internal.html : htmlEscape, htmlAttribEscape;\n";
+	ret ~= "import std.format : formattedWrite;\n";
 	foreach (i, n; doc.nodes)
 		ret ~= ctx.getHTMLMixin(n, i == 0);
 	ret ~= ctx.flushRawText();
@@ -218,7 +261,7 @@ private string getElementMixin(ref CTX ctx, in Node node)
 					ret ~= ctx.rawText(node.loc, htmlAttribEscape(v.value));
 					break;
 				case interpolation, rawInterpolation:
-					ret ~= ctx.statement(node.loc, q{%s.filterHTMLAttribEscape((%s).to!string);}, ctx.rangeName, v.value);
+					ret ~= ctx.statement(node.loc, q{%s.htmlAttribEscape(%s);}, ctx.rangeName, v.value);
 					break;
 			}
 		}
@@ -265,9 +308,9 @@ private string getNodeContentsMixin(ref CTX ctx, in NodeContent c, bool first)
 		case text:
 			return ctx.rawText(c.loc, c.value);
 		case interpolation:
-			return ctx.statement(c.loc, q{%s.filterHTMLEscape((%s).to!string);}, ctx.rangeName, c.value);
+			return ctx.statement(c.loc, q{%s.htmlEscape(%s);}, ctx.rangeName, c.value);
 		case rawInterpolation:
-			return ctx.statement(c.loc, q{%s.put((%s).to!string);}, ctx.rangeName, c.value);
+			return ctx.statement(c.loc, q{%s.formattedWrite("%%s", %s);}, ctx.rangeName, c.value);
 	}
 }
 
@@ -340,7 +383,8 @@ private string getCodeMixin(ref CTX ctx, in ref Node node)
 			ret ~= ctx.statement(node.loc, "%s {", c.value);
 			got_code = true;
 		} else {
-			ret ~= ctx.getNodeContentsMixin(c, i == 0);
+			assert(c.kind == NodeContent.Kind.node);
+			ret ~= ctx.getHTMLMixin(c.node, i == 0 || (got_code && i == 1));
 		}
 	}
 	ret ~= ctx.statement(node.loc, "}");
@@ -479,4 +523,33 @@ unittest { // blocks and extensions
 		 == "<body><p>Default</p></body>");
 	assert(compilePair!("extends base\nprepend test\n\tp Hello", "body\n\tblock test\n\t\tp Default")
 		 == "<body><p>Hello</p><p>Default</p></body>");
+}
+
+/*@nogc*/ @safe unittest { // NOTE: formattedWrite is not @nogc
+	static struct R {
+		@nogc @safe nothrow:
+		void put(in char[]) {}
+		void put(char) {}
+		void put(dchar) {}
+	}
+
+	R r;
+	r.compileHTMLDietString!(
+`doctype html
+html
+	- foreach (i; 0 .. 10)
+		title= i
+	title t #{12} !{13}
+`);
+}
+
+unittest { // issue 4 - nested text in code
+	static string compile(string diet, ALIASES...)() {
+		import std.array : appender;
+		import std.string : strip;
+		auto dst = appender!string;
+		compileHTMLDietString!(diet, ALIASES)(dst);
+		return strip(cast(string)(dst.data));
+	}
+	assert(compile!"- if (true)\n\t| int bar;" == "int bar;", compile!"- if (true)\n\t| int bar;");
 }
