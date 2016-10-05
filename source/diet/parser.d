@@ -241,7 +241,18 @@ unittest { // test basic functionality
 		new Node(ln(0), ":", [Attribute(ln(0), "filterChain", [AttributeContent.text("foo bar")])], [
 			NodeContent.text("baz", ln(0))
 		], NodeAttribs.textNode)
-	], parseDiet(":foo :bar baz").text);
+	]);
+	assert(parseDiet(":foo\n\t:bar baz").nodes == [
+		new Node(ln(0), ":", [Attribute(ln(0), "filterChain", [AttributeContent.text("foo")])], [
+			NodeContent.text(":bar baz", ln(1))
+		], NodeAttribs.textNode)
+	]);
+	assert(parseDiet(":foo\n\tbar\n\t\t:baz").nodes == [
+		new Node(ln(0), ":", [Attribute(ln(0), "filterChain", [AttributeContent.text("foo")])], [
+			NodeContent.text("bar", ln(1)),
+			NodeContent.text("\n\t:baz", ln(2))
+		], NodeAttribs.textNode)
+	]);
 
 	// nested nodes
 	assert(parseDiet("a: b").nodes == [
@@ -277,6 +288,9 @@ unittest { // test basic functionality
 
 	// whitespace fitting
 	assert(parseDiet("a<>").nodes == [
+		new Node(ln(0), "a", null, [], NodeAttribs.fitInside|NodeAttribs.fitOutside)
+	]);
+	assert(parseDiet("a><").nodes == [
 		new Node(ln(0), "a", null, [], NodeAttribs.fitInside|NodeAttribs.fitOutside)
 	]);
 	assert(parseDiet("a<").nodes == [
@@ -541,6 +555,16 @@ unittest { // test CTFE-ability
 	static assert(result.nodes.length == 1);
 }
 
+unittest { // regression tests
+	import std.conv : to;
+	Location ln(int l) { return Location("string", l); }
+
+	// last line contains only whitespace
+	assert(parseDiet("test\n\t").nodes == [
+		new Node(ln(0), "test")
+	]);
+}
+
 
 /** Dummy translation function that returns the input unmodified.
 */
@@ -763,7 +787,7 @@ Node[] parseDietRaw(alias TR)(InputFile file)
 		string indent = input.skipIndent();
 
 		// skip empty lines and ignore whitespace on those
-		if (input.length == 0 || input[0] == '\n') { input.popFront(); loc.line++; continue; }
+		if (input.empty || input[0] == '\n') { if (!input.empty) input.popFront(); loc.line++; continue; }
 		if (input[0] == '\r') { input.popFrontN(input.length >= 2 && input[1] == '\n' ? 2 : 1); loc.line++; continue; }
 
 		enforcep(prevlevel >= 0 || indent.length == 0, "First node must not be indented.", loc);
@@ -932,11 +956,14 @@ private Node parseTagLine(alias TR)(ref string input, ref Location loc, out bool
 
 		if (remainder.length && remainder[0] == ' ') {
 			// parse the rest of the line as text contents (if any non-ws)
-			remainder = TR(remainder[1 .. $]);
+			remainder = remainder[1 .. $];
+			if (ret.attribs & NodeAttribs.translated)
+				remainder = TR(remainder);
 			parseTextLine(remainder, ret, tmploc);
 		} else if (ret.name == Node.SpecialName.text) {
 			// allow omitting the whitespace for "|" text nodes
-			remainder = TR(remainder);
+			if (ret.attribs & NodeAttribs.translated)
+				remainder = TR(remainder);
 			parseTextLine(remainder, ret, tmploc);
 		} else {
 			import std.string : strip;
@@ -992,6 +1019,12 @@ private bool parseTag(ref string input, ref size_t idx, ref Node dst, ref bool h
 	if (idx < input.length && input[idx] == '>') {
 		idx++;
 		dst.attribs |= NodeAttribs.fitOutside;
+	}
+
+	// avoid whitespace inside of tag (also allowed after >)
+	if (!(dst.attribs & NodeAttribs.fitInside) && idx < input.length && input[idx] == '<') {
+		idx++;
+		dst.attribs |= NodeAttribs.fitInside;
 	}
 
 	// translate text contents

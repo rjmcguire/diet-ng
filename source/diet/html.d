@@ -22,6 +22,12 @@ import diet.traits;
 			attribute.
 		dst = The output range to write the generated HTML to.
 
+	Traits:
+		In addition to the default Diet traits, adding an enum field
+		`htmlOutputStyle` of type `HTMLOutputStyle` to a traits
+		struct can be used to control the style of the generated
+		HTML.
+
 	See_Also: `compileHTMLDietString`, `compileHTMLDietStrings`
 */
 template compileHTMLDietFile(string filename, ALIASES...)
@@ -57,9 +63,10 @@ template compileHTMLDietFile(string filename, ALIASES...)
 		pragma(msg, "Using cached Diet HTML template "~filename~"...");
 		enum _dietParser = import(_diet_cache_file_name);
 	} else {
+		alias TRAITS = DietTraits!ALIASES;
 		pragma(msg, "Compiling Diet HTML template "~filename~"...");
-		Document _diet_nodes() { return applyTraits!ALIASES(parseDiet!(translate!ALIASES)(_diet_files)); }
-		enum _dietParser = getHTMLMixin(_diet_nodes());
+		private Document _diet_nodes() { return applyTraits!TRAITS(parseDiet!(translate!TRAITS)(_diet_files)); }
+		enum _dietParser = getHTMLMixin(_diet_nodes(), dietOutputRangeName, getHTMLOutputStyle!TRAITS);
 
 		static if (_diet_use_cache) {
 			shared static this()
@@ -72,7 +79,7 @@ template compileHTMLDietFile(string filename, ALIASES...)
 	}
 
 	// uses the correct range name and removes 'dst' from the scope
-	void exec(R)(ref R _diet_output)
+	private void exec(R)(ref R _diet_output)
 	{
 		mixin(localAliasesMixin!(0, ALIASES));
 		//pragma(msg, getHTMLMixin(nodes));
@@ -122,14 +129,15 @@ template compileHTMLDietString(string contents, ALIASES...)
 */
 template compileHTMLDietStrings(alias FILES_GROUP, ALIASES...)
 {
-	static Document _diet_nodes() { return applyTraits!ALIASES(parseDiet!(translate!ALIASES)(filesFromGroup!FILES_GROUP)); }
+	alias TRAITS = DietTraits!ALIASES;
+	private static Document _diet_nodes() { return applyTraits!TRAITS(parseDiet!(translate!TRAITS)(filesFromGroup!FILES_GROUP)); }
 
 	// uses the correct range name and removes 'dst' from the scope
-	static void exec(R)(ref R _diet_output)
+	private void exec(R)(ref R _diet_output)
 	{
 		mixin(localAliasesMixin!(0, ALIASES));
 		//pragma(msg, getHTMLMixin(_diet_nodes()));
-		mixin(getHTMLMixin(_diet_nodes()));
+		mixin(getHTMLMixin(_diet_nodes(), dietOutputRangeName, getHTMLOutputStyle!TRAITS));
 	}
 
 	void compileHTMLDietStrings(R)(ref R dst)
@@ -148,9 +156,10 @@ template compileHTMLDietStrings(alias FILES_GROUP, ALIASES...)
 	Returns:
 		A string of D statements suitable to be mixed in inside of a function.
 */
-string getHTMLMixin(in Document doc, string range_name = dietOutputRangeName)
+string getHTMLMixin(in Document doc, string range_name = dietOutputRangeName, HTMLOutputStyle style = HTMLOutputStyle.compact)
 {
 	CTX ctx;
+	ctx.pretty = style == HTMLOutputStyle.pretty;
 	ctx.rangeName = range_name;
 	string ret = "import diet.internal.html : htmlEscape, htmlAttribEscape;\n";
 	ret ~= "import std.format : formattedWrite;\n";
@@ -186,6 +195,42 @@ unittest {
 	test!"#foo"("<div id=\"foo\"></div>");
 }
 
+
+/** Determines how the generated HTML gets styled.
+
+	To use this, put an enum field named `htmlOutputStyle` into a diet traits
+	struct and pass that to the render function.
+
+	The default output style is `compact`.
+*/
+enum HTMLOutputStyle {
+	compact, /// Outputs no extraneous whitespace (including line breaks) around HTML tags
+	pretty, /// Inserts line breaks and indents lines according to their nesting level in the HTML structure
+}
+
+///
+unittest {
+	@dietTraits
+	struct Traits {
+		enum htmlOutputStyle = HTMLOutputStyle.pretty;
+	}
+
+	import std.array : appender;
+	auto dst = appender!string();
+	dst.compileHTMLDietString!("html\n\tbody\n\t\tp Hello", Traits);
+	import std.conv : to;
+	assert(dst.data == "<html>\n\t<body>\n\t\t<p>Hello</p>\n\t</body>\n</html>", [dst.data].to!string);
+}
+
+private @property template getHTMLOutputStyle(TRAITS...)
+{
+	static if (TRAITS.length) {
+		static if (is(typeof(TRAITS[0].htmlOutputStyle)))
+			enum getHTMLOutputStyle = TRAITS[0].htmlOutputStyle;
+		else enum getHTMLOutputStyle = getHTMLOutputStyle!(TRAITS[1 .. $]);
+	} else enum getHTMLOutputStyle = HTMLOutputStyle.compact;
+}
+
 private string getHTMLMixin(ref CTX ctx, in Node node, bool first)
 {
 	switch (node.name) {
@@ -208,9 +253,13 @@ private string getElementMixin(ref CTX ctx, in Node node)
 {
 	import std.algorithm : countUntil;
 
+	bool need_newline = ctx.needPrettyNewline(node.contents);
+
 	// write tag name
 	string tagname = node.name.length ? node.name : "div";
-	string ret = ctx.rawText(node.loc, "<"~tagname);
+	string ret;
+	if (need_newline) ctx.prettyNewLine();
+	ret ~= ctx.rawText(node.loc, "<"~tagname);
 
 	bool had_class = false;
 
@@ -224,6 +273,7 @@ private string getElementMixin(ref CTX ctx, in Node node)
 			had_class = true;
 			foreach (ca; node.attributes[ai+1 .. $]) {
 				if (ca.name != "class") continue;
+				if (!ca.contents.length || (ca.isText && !ca.expectText.length)) continue;
 				att.addText(" ");
 				att.addContents(ca.contents);
 			}
@@ -285,13 +335,23 @@ private string getElementMixin(ref CTX ctx, in Node node)
 	ret ~= ctx.rawText(node.loc, ">");
 
 	// write contents
-	ctx.depth++;
+	if (need_newline) {
+		ctx.depth++;
+		ctx.prettyNewLine();
+	}
+	
 	foreach (i, c; node.contents)
 		ret ~= ctx.getNodeContentsMixin(c, i == 0);
-	ctx.depth--;
+	
+	if (need_newline) {
+		ctx.depth--;
+		ctx.prettyNewLine();
+	}
 
 	// write end tag
 	ret ~= ctx.rawText(node.loc, "</"~tagname~">");
+
+	if (need_newline) ctx.prettyNewLine();
 
 	return ret;
 }
@@ -300,17 +360,13 @@ private string getNodeContentsMixin(ref CTX ctx, in NodeContent c, bool first)
 {
 	final switch (c.kind) with (NodeContent.Kind) {
 		case node:
-			string ret;
-			ret ~= ctx.prettyNewLine(c.loc);
-			ret ~= getHTMLMixin(ctx, c.node, first);
-			ret ~= ctx.prettyNewLine(c.loc);
-			return ret;
+			return getHTMLMixin(ctx, c.node, first);
 		case text:
 			return ctx.rawText(c.loc, c.value);
 		case interpolation:
-			return ctx.statement(c.loc, q{%s.htmlEscape(%s);}, ctx.rangeName, c.value);
+			return ctx.textStatement(c.loc, q{%s.htmlEscape(%s);}, ctx.rangeName, c.value);
 		case rawInterpolation:
-			return ctx.statement(c.loc, q{%s.formattedWrite("%%s", %s);}, ctx.rangeName, c.value);
+			return ctx.textStatement(c.loc, q{() @trusted { return (&%s); } ().formattedWrite("%%s", %s);}, ctx.rangeName, c.value);
 	}
 }
 
@@ -394,24 +450,35 @@ private string getCodeMixin(ref CTX ctx, in ref Node node)
 private string getCommentMixin(ref CTX ctx, in ref Node node)
 {
 	string ret = ctx.rawText(node.loc, "<!--");
+	ctx.depth++;
 	foreach (i, c; node.contents)
 		ret ~= ctx.getNodeContentsMixin(c, i == 0);
+	ctx.depth--;
 	ret ~= ctx.rawText(node.loc, "-->");
 	return ret;
 }
 
 private struct CTX {
 	bool isHTML5;
-	bool pretty = false;
+	bool pretty;
 	int depth = 0;
 	string rangeName;
 	bool inRawText;
+	bool newlinePending, anyText;
 
 	pure string statement(ARGS...)(Location loc, string fmt, ARGS args)
 	{
 		import std.string : format;
 		string ret = flushRawText();
 		ret ~= ("#line %s \"%s\"\n"~fmt~"\n").format(loc.line+1, loc.file, args);
+		return ret;
+	}
+
+	pure string textStatement(ARGS...)(Location loc, string fmt, ARGS args)
+	{
+		string ret;
+		if (pretty && newlinePending) ret ~= rawText(loc, null);
+		ret ~= statement(loc, fmt, args);
 		return ret;
 	}
 
@@ -422,7 +489,9 @@ private struct CTX {
 			ret = this.rangeName ~ ".put(\"";
 			this.inRawText = true;
 		}
+		ret ~= outputPendingNewline();
 		ret ~= dstringEscape(text);
+		anyText = true;
 		return ret;
 	}
 
@@ -435,10 +504,21 @@ private struct CTX {
 		return null;
 	}
 
-	string prettyNewLine(in ref Location loc) {
-		import std.array : replicate;
-		if (pretty) return rawText(loc, "\n"~"\t".replicate(depth));
-		else return null;
+	void prettyNewLine() { newlinePending = true; }
+
+	bool needPrettyNewline(in NodeContent[] contents) {
+		import std.algorithm.searching : any;
+		return pretty && contents.any!(c => c.kind == NodeContent.Kind.node);
+	}
+
+	private pure string outputPendingNewline()
+	{
+		if (pretty && newlinePending) {
+			import std.array : replicate;
+			newlinePending = false;
+			return anyText ? "\n"~"\t".replicate(depth) : null;
+		}
+		return null;
 	}
 }
 
@@ -552,4 +632,43 @@ unittest { // issue 4 - nested text in code
 		return strip(cast(string)(dst.data));
 	}
 	assert(compile!"- if (true)\n\t| int bar;" == "int bar;", compile!"- if (true)\n\t| int bar;");
+}
+
+unittest { // class instance variables
+	import std.array : appender;
+	import std.string : strip;
+
+	static class C {
+		int x = 42;
+
+		string test()
+		{
+			auto dst = appender!string;
+			dst.compileHTMLDietString!("| #{x}", x);
+			return dst.data;
+		}
+	}
+
+	auto c = new C;
+	assert(c.test().strip == "42");
+}
+
+unittest { // raw interpolation for non-copyable range
+	struct R { @disable this(this); void put(dchar) {} void put(in char[]) {} }
+	R r;
+	r.compileHTMLDietString!("a !{2}");
+}
+
+unittest {
+	assert(utCompile!(".foo(class=true?\"bar\":\"baz\")") == "<div class=\"foo bar\"></div>", utCompile!".foo(class=true?\"bar\":\"baz\")");
+}
+
+version (unittest) {
+	private string utCompile(string diet, ALIASES...)() {
+		import std.array : appender;
+		import std.string : strip;
+		auto dst = appender!string;
+		compileHTMLDietString!(diet, ALIASES)(dst);
+		return strip(cast(string)(dst.data));
+	}
 }

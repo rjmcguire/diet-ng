@@ -59,20 +59,22 @@ unittest {
 	`!{...}`, where the contents form an arbitrary D expression. The
 	translation function is required to pass these through unmodified.
 */
-string translate(ALIASES...)(string text)
+string translate(TRAITS...)(string text)
 {
 	import std.traits : hasUDA;
 
-	foreach (T; DietTraits!ALIASES)
-		static if (is(typeof(T.translate)))
+	foreach (T; TRAITS) {
+		static assert(hasUDA!(T, DietTraitsAttribute));
+		static if (is(typeof(&T.translate)))
 			text = T.translate(text);
+	}
 	return text;
 }
 
 
 /** Applies any transformations that are defined in the 
 */
-Document applyTraits(ALIASES...)(Document doc)
+Document applyTraits(TRAITS...)(Document doc)
 {
 	import diet.defs : enforcep;
 	import std.algorithm.searching : startsWith;
@@ -111,8 +113,8 @@ Document applyTraits(ALIASES...)(Document doc)
 
 			if (n.isTextNode) {
 				while (chain.length) {
-					if (hasFilterCT!ALIASES(chain[$-1])) {
-						n.contents[0].value = runFilterCT!ALIASES(n.contents[0].value, chain[$-1]);
+					if (hasFilterCT!TRAITS(chain[$-1])) {
+						n.contents[0].value = runFilterCT!TRAITS(n.contents[0].value, chain[$-1]);
 						chain.length--;
 					} else break;
 				}
@@ -146,8 +148,9 @@ void filter(ALIASES...)(in char[] input, string filter, CharacterSink output)
 					return;
 				}
 		}
-	
-	output(input);
+
+	// FIXME: output location information
+	throw new Exception("Unknown filter: "~filter);
 }
 
 private string generateFilterChainMixin(string[] chain, NodeContent[] contents)
@@ -173,7 +176,7 @@ private string generateFilterChainMixin(string[] chain, NodeContent[] contents)
 					ret ~= q{%s_app.formattedWrite("%%s", %s);}.format(tloname, c.value);
 					break;
 				case NodeContent.Kind.interpolation:
-					enforcep(false, "Raw interpolations are not supported within filter contents.", c.loc);
+					enforcep(false, "Non-raw interpolations are not supported within filter contents.", c.loc);
 					break;
 			}
 			ret ~= "\n";
@@ -236,53 +239,56 @@ unittest {
 
 private struct DietTraitsAttribute {}
 
-private bool hasFilterCT(ALIASES...)(string filter)
+private bool hasFilterCT(TRAITS...)(string filter)
 {
-	alias Filters = FiltersFromAliases!ALIASES;
+	alias Filters = FiltersFromTraits!TRAITS;
 	static if (Filters.length) {
 		switch (filter) {
-			default: return false;
+			default: break;
 			foreach (i, F; Filters) {
 				case FilterName!(Filters[i]): return true;
 			}
 		}
-	} else return false;
+	}
+	return false;
 }
 
-private string runFilterCT(ALIASES...)(string text, string filter)
+private string runFilterCT(TRAITS...)(string text, string filter)
 {
-	alias Filters = FiltersFromAliases!ALIASES;
+	alias Filters = FiltersFromTraits!TRAITS;
 	static if (Filters.length) {
 		switch (filter) {
-			default: return text; // FIXME: error out?
+			default: break;
 			foreach (i, F; Filters) {
 				case FilterName!(Filters[i]): return F(text);
 			}
 		}
-	} else return text; // FIXME: error out?
+	}
+	return text; // FIXME: error out?
 }
 
-private template FiltersFromAliases(ALIASES...)
+private template FiltersFromTraits(TRAITS...)
 {
 	import std.meta : AliasSeq;
-	alias Traits = DietTraits!ALIASES;
 	template impl(size_t i) {
-		static if (i < Traits.length) {
+		static if (i < TRAITS.length) {
 			// FIXME: merge lists avoiding duplicates
-			alias impl = AliasSeq!(FiltersFromContext!(Traits[i]), impl!(i+1));
+			alias impl = AliasSeq!(FiltersFromContext!(TRAITS[i]), impl!(i+1));
 		} else alias impl = AliasSeq!();
 	}
-	alias FiltersFromAliases = impl!0;
+	alias FiltersFromTraits = impl!0;
 }
 
-private template DietTraits(ALIASES...)
+/** Extracts all Diet traits structs from a set of aliases as passed to a render function.
+*/
+template DietTraits(ALIASES...)
 {
 	import std.meta : AliasSeq;
 	import std.traits : hasUDA;
 
 	template impl(size_t i) {
 		static if (i < ALIASES.length) {
-			static if (hasUDA!(ALIASES[i], DietTraitsAttribute)) {
+			static if (is(ALIASES[i]) && hasUDA!(ALIASES[i], DietTraitsAttribute)) {
 				alias impl = AliasSeq!(ALIASES[i], impl!(i+1));
 			} else alias impl = impl!(i+1);
 		} else alias impl = AliasSeq!();
